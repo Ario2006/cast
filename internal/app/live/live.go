@@ -1,0 +1,284 @@
+// Package live serves a selected project directory over a small, read-only
+// local-network HTTP session.
+package live
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"fmt"
+	"html"
+	"io"
+	"mime"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	pathpkg "path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+const discoveryPort = 39422
+
+var codeAlphabet = []byte("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+
+// Session contains the user-facing details of an active live directory.
+type Session struct {
+	Code      string
+	Root      string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	URL       string
+	LocalURL  string
+}
+
+// Server owns an active read-only project directory session.
+type Server struct {
+	session  Session
+	token    string
+	root     string
+	realRoot string
+	http     *http.Server
+	listener net.Listener
+	stopOnce sync.Once
+}
+
+// StartDirectory exposes root as a read-only HTTP directory until stopped.
+func StartDirectory(root string, lifetime time.Duration) (*Server, error) {
+	if lifetime <= 0 {
+		return nil, fmt.Errorf("live session lifetime must be positive")
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project directory: %w", err)
+	}
+	info, err := os.Stat(absoluteRoot)
+	if err != nil {
+		return nil, fmt.Errorf("inspect project directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%q is not a directory", root)
+	}
+	realRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project directory links: %w", err)
+	}
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		return nil, fmt.Errorf("listen for live session: %w", err)
+	}
+	code, err := randomCode(6)
+	if err != nil {
+		listener.Close()
+		return nil, err
+	}
+	token, err := randomToken()
+	if err != nil {
+		listener.Close()
+		return nil, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	createdAt := time.Now()
+	server := &Server{
+		root:     absoluteRoot,
+		realRoot: realRoot,
+		token:    token,
+		listener: listener,
+		session: Session{
+			Code:      code,
+			Root:      absoluteRoot,
+			CreatedAt: createdAt,
+			ExpiresAt: createdAt.Add(lifetime),
+			URL:       sessionURL(localIPv4(), port, code, token),
+			LocalURL:  sessionURL(net.IPv4(127, 0, 0, 1), port, code, token),
+		},
+	}
+	server.http = &http.Server{Handler: http.HandlerFunc(server.serve)}
+	go func() { _ = server.http.Serve(listener) }()
+	return server, nil
+}
+
+// Session returns the immutable session metadata.
+func (s *Server) Session() Session { return s.session }
+
+// Stop cleanly closes the HTTP listener.
+func (s *Server) Stop(ctx context.Context) error {
+	var stopErr error
+	s.stopOnce.Do(func() { stopErr = s.http.Shutdown(ctx) })
+	return stopErr
+}
+
+func (s *Server) serve(writer http.ResponseWriter, request *http.Request) {
+	prefix := "/c/" + s.session.Code
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		http.Error(writer, "Method not allowed.", http.StatusMethodNotAllowed)
+		return
+	}
+	if request.URL.Path != prefix && !strings.HasPrefix(request.URL.Path, prefix+"/") {
+		http.NotFound(writer, request)
+		return
+	}
+	if time.Now().After(s.session.ExpiresAt) {
+		http.Error(writer, "This live session has expired.", http.StatusGone)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(request.URL.Query().Get("token")), []byte(s.token)) != 1 {
+		http.Error(writer, "A valid live-session token is required.", http.StatusForbidden)
+		return
+	}
+	relativePath := strings.TrimPrefix(request.URL.Path, prefix)
+	if relativePath == "" {
+		relativePath = "/"
+	}
+	filePath, err := s.safePath(relativePath)
+	if err != nil {
+		http.Error(writer, "The requested path is outside the live project.", http.StatusForbidden)
+		return
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	if info.IsDir() {
+		if !strings.HasSuffix(request.URL.Path, "/") {
+			redirect := request.URL.Path + "/?" + request.URL.RawQuery
+			http.Redirect(writer, request, redirect, http.StatusMovedPermanently)
+			return
+		}
+		s.serveDirectory(writer, request, file, relativePath)
+		return
+	}
+	if contentType := mime.TypeByExtension(filepath.Ext(info.Name())); contentType != "" {
+		writer.Header().Set("Content-Type", contentType)
+	}
+	http.ServeContent(writer, request, info.Name(), info.ModTime(), file)
+}
+
+func (s *Server) safePath(requestPath string) (string, error) {
+	cleaned := pathpkg.Clean("/" + requestPath)
+	relative := strings.TrimPrefix(cleaned, "/")
+	candidate := filepath.Join(s.root, filepath.FromSlash(relative))
+	relativeToRoot, err := filepath.Rel(s.root, candidate)
+	if err != nil || relativeToRoot == ".." || strings.HasPrefix(relativeToRoot, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes root")
+	}
+	realCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	relativeToRealRoot, err := filepath.Rel(s.realRoot, realCandidate)
+	if err != nil || relativeToRealRoot == ".." || strings.HasPrefix(relativeToRealRoot, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("symlink escapes root")
+	}
+	return realCandidate, nil
+}
+
+func (s *Server) serveDirectory(writer http.ResponseWriter, request *http.Request, directory *os.File, relativePath string) {
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		http.Error(writer, "Could not list this directory.", http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if request.Method == http.MethodHead {
+		return
+	}
+	base := "/c/" + s.session.Code + "/" + strings.TrimPrefix(relativePath, "/")
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	query := "?token=" + url.QueryEscape(s.token)
+	var page strings.Builder
+	page.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>cast live</title></head><body><h1>Live project</h1><ul>")
+	if strings.Trim(relativePath, "/") != "" {
+		parent := pathpkg.Dir(strings.TrimSuffix(base, "/"))
+		page.WriteString("<li><a href=\"")
+		page.WriteString(html.EscapeString(parent + "/" + query))
+		page.WriteString("\">..</a></li>")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		path := base + url.PathEscape(name)
+		label := name
+		if entry.IsDir() {
+			path += "/"
+			label += "/"
+		}
+		page.WriteString("<li><a href=\"")
+		page.WriteString(html.EscapeString(path + query))
+		page.WriteString("\">")
+		page.WriteString(html.EscapeString(label))
+		page.WriteString("</a></li>")
+	}
+	page.WriteString("</ul></body></html>")
+	_, _ = io.WriteString(writer, page.String())
+}
+
+func randomCode(length int) (string, error) {
+	bytes := make([]byte, length)
+	for index := range bytes {
+		for {
+			var byteValue [1]byte
+			if _, err := rand.Read(byteValue[:]); err != nil {
+				return "", fmt.Errorf("generate live code: %w", err)
+			}
+			limit := 256 - (256 % len(codeAlphabet))
+			if int(byteValue[0]) < limit {
+				bytes[index] = codeAlphabet[int(byteValue[0])%len(codeAlphabet)]
+				break
+			}
+		}
+	}
+	return string(bytes), nil
+}
+
+func randomToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate live token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func sessionURL(address net.IP, port int, code, token string) string {
+	value := url.URL{Scheme: "http", Host: net.JoinHostPort(address.String(), fmt.Sprintf("%d", port)), Path: "/c/" + code}
+	query := value.Query()
+	query.Set("token", token)
+	value.RawQuery = query.Encode()
+	return value.String()
+}
+
+func localIPv4() net.IP {
+	interfaces, err := net.Interfaces()
+	if err == nil {
+		for _, networkInterface := range interfaces {
+			if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addresses, err := networkInterface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, address := range addresses {
+				if ip, ok := address.(*net.IPNet); ok && ip.IP.To4() != nil && !ip.IP.IsLoopback() {
+					return ip.IP.To4()
+				}
+			}
+		}
+	}
+	return net.IPv4(127, 0, 0, 1)
+}
