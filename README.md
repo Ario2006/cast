@@ -11,6 +11,8 @@ cast version
 cast calc '(12 + 8) * 3'
 cast conv 10 km mi
 cast clip
+cast share report.pdf
+cast receive 7F92K8
 ```
 
 ## Development
