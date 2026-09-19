@@ -149,3 +149,84 @@ func addPath(rawURL, name string) string {
 	parsed.Path += "/" + name
 	return parsed.String()
 }
+
+func TestLiveResolveFindsActiveDirectorySession(t *testing.T) {
+	root := t.TempDir()
+	server, err := StartDirectory(root, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resolved, err := Resolve(ctx, server.Session().Code)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Code != server.Session().Code || resolved.URL != server.Session().URL {
+		t.Fatalf("Resolve() = %+v, want URL %s", resolved, server.Session().URL)
+	}
+	if resolved.Project != filepath.Base(root) {
+		t.Fatalf("Resolve() Project = %q, want %q", resolved.Project, filepath.Base(root))
+	}
+	if resolved.Device == "" {
+		t.Fatal("Resolve() Device is empty")
+	}
+}
+
+func TestLiveResolveFindsActiveProxySession(t *testing.T) {
+	backend := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("ok"))
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go backend.Serve(listener)
+	defer backend.Close()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	server, err := StartProxy(port, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resolved, err := Resolve(ctx, server.Session().Code)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Code != server.Session().Code || resolved.URL != server.Session().URL {
+		t.Fatalf("Resolve() = %+v", resolved)
+	}
+}
+
+func TestLiveResolveRejectsInvalidAndExpiredCode(t *testing.T) {
+	// Invalid code
+	_, err := Resolve(context.Background(), "??")
+	if err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("Resolve(??) error = %v, want invalid code error", err)
+	}
+
+	// Expired session
+	root := t.TempDir()
+	server, err := StartDirectory(root, time.Nanosecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+	time.Sleep(2 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = Resolve(ctx, server.Session().Code)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Resolve(expired) error = %v, want expired error", err)
+	}
+}

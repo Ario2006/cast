@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	liveapp "github.com/aryankumar/cast/internal/app/live"
 	"github.com/aryankumar/cast/internal/apperror"
 )
 
@@ -80,5 +83,26 @@ func TestClipClearCommand(t *testing.T) {
 	}
 	if got := out.String(); got != "Clipboard history cleared.\n" {
 		t.Fatalf("clip clear output = %q", got)
+	}
+}
+
+func TestConnectCommand(t *testing.T) {
+	root := t.TempDir()
+	server, err := liveapp.StartDirectory(root, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+
+	var out bytes.Buffer
+	cmd := NewRootCommand(Options{Out: &out})
+	cmd.SetArgs([]string{"connect", server.Session().Code})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, "Connected to:") || !strings.Contains(output, "URL:") || !strings.Contains(output, server.Session().URL) {
+		t.Fatalf("connect command output = %q", output)
 	}
 }

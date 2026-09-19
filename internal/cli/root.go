@@ -51,7 +51,7 @@ func NewRootCommand(options Options) *cobra.Command {
 	cmd.SetOut(options.Out)
 	cmd.SetErr(options.ErrOut)
 	cmd.PersistentFlags().BoolVar(&debug, "debug", false, "show diagnostic logging on stderr")
-	cmd.AddCommand(newCalcCommand(), newClipCommand(), newConvCommand(), newLiveCommand(), newReceiveCommand(), newShareCommand(), newVersionCommand(options.Version))
+	cmd.AddCommand(newCalcCommand(), newClipCommand(), newConnectCommand(), newConvCommand(), newLiveCommand(), newReceiveCommand(), newShareCommand(), newVersionCommand(options.Version))
 	return cmd
 }
 

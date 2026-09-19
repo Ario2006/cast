@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -46,6 +47,7 @@ type Server struct {
 	realRoot string
 	http     *http.Server
 	listener net.Listener
+	udp      *net.UDPConn
 	proxy    *httputil.ReverseProxy
 	stopOnce sync.Once
 }
@@ -102,6 +104,10 @@ func StartDirectory(root string, lifetime time.Duration) (*Server, error) {
 	}
 	server.http = &http.Server{Handler: http.HandlerFunc(server.serve)}
 	go func() { _ = server.http.Serve(listener) }()
+	if err := server.startDiscovery(); err != nil {
+		server.Stop(context.Background())
+		return nil, err
+	}
 	return server, nil
 }
 
@@ -111,7 +117,12 @@ func (s *Server) Session() Session { return s.session }
 // Stop cleanly closes the HTTP listener.
 func (s *Server) Stop(ctx context.Context) error {
 	var stopErr error
-	s.stopOnce.Do(func() { stopErr = s.http.Shutdown(ctx) })
+	s.stopOnce.Do(func() {
+		if s.udp != nil {
+			_ = s.udp.Close()
+		}
+		stopErr = s.http.Shutdown(ctx)
+	})
 	return stopErr
 }
 
@@ -181,6 +192,10 @@ func StartProxy(localPort int, lifetime time.Duration) (*Server, error) {
 	}
 	server.http = &http.Server{Handler: http.HandlerFunc(server.serveProxy)}
 	go func() { _ = server.http.Serve(listener) }()
+	if err := server.startDiscovery(); err != nil {
+		server.Stop(context.Background())
+		return nil, err
+	}
 	return server, nil
 }
 
@@ -369,4 +384,137 @@ func localIPv4() net.IP {
 		}
 	}
 	return net.IPv4(127, 0, 0, 1)
+}
+
+func (s *Server) startDiscovery() error {
+	connection, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: discoveryPort})
+	if err != nil {
+		return fmt.Errorf("listen for local live discovery: %w", err)
+	}
+	s.udp = connection
+	go func() {
+		buffer := make([]byte, 1024)
+		for {
+			count, sender, err := connection.ReadFromUDP(buffer)
+			if err != nil {
+				return
+			}
+			var request discoveryRequest
+			if json.Unmarshal(buffer[:count], &request) != nil || request.Type != "cast-live-discover" || request.Code != s.session.Code {
+				continue
+			}
+			project := s.session.Root
+			if s.root != "" {
+				project = filepath.Base(s.root)
+			}
+			response, _ := json.Marshal(discoveryResponse{
+				Type:      "cast-live",
+				Code:      s.session.Code,
+				URL:       s.session.URL,
+				Project:   project,
+				Device:    deviceName(),
+				ExpiresAt: s.session.ExpiresAt,
+			})
+			_, _ = connection.WriteToUDP(response, sender)
+		}
+	}()
+	return nil
+}
+
+type discoveryRequest struct {
+	Type string `json:"type"`
+	Code string `json:"code"`
+}
+
+type discoveryResponse struct {
+	Type      string    `json:"type"`
+	Code      string    `json:"code"`
+	URL       string    `json:"url"`
+	Project   string    `json:"project"`
+	Device    string    `json:"device"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// ResolvedSession is the result of discovering an active live session by short code.
+type ResolvedSession struct {
+	Code      string
+	URL       string
+	Project   string
+	Device    string
+	ExpiresAt time.Time
+}
+
+// Resolve broadcasts a short-code lookup for an active live session over the local network
+// and loopback interface.
+func Resolve(ctx context.Context, code string) (ResolvedSession, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if !validCode(code) {
+		return ResolvedSession{}, fmt.Errorf("invalid live session code")
+	}
+	connection, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return ResolvedSession{}, fmt.Errorf("start local live discovery: %w", err)
+	}
+	defer connection.Close()
+	if err := enableBroadcast(connection); err != nil {
+		return ResolvedSession{}, fmt.Errorf("enable local live discovery: %w", err)
+	}
+	payload, _ := json.Marshal(discoveryRequest{Type: "cast-live-discover", Code: code})
+	for _, target := range []*net.UDPAddr{
+		{IP: net.IPv4(127, 0, 0, 1), Port: discoveryPort},
+		{IP: net.IPv4bcast, Port: discoveryPort},
+	} {
+		_, _ = connection.WriteToUDP(payload, target)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	if requestedDeadline, ok := ctx.Deadline(); ok && requestedDeadline.Before(deadline) {
+		deadline = requestedDeadline
+	}
+	if err := connection.SetReadDeadline(deadline); err != nil {
+		return ResolvedSession{}, fmt.Errorf("set live discovery deadline: %w", err)
+	}
+	buffer := make([]byte, 2048)
+	for {
+		count, _, err := connection.ReadFromUDP(buffer)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ResolvedSession{}, ctx.Err()
+			}
+			return ResolvedSession{}, fmt.Errorf("live session code was not found on the local network")
+		}
+		var response discoveryResponse
+		if json.Unmarshal(buffer[:count], &response) != nil || response.Type != "cast-live" || response.Code != code || response.URL == "" {
+			continue
+		}
+		if time.Now().After(response.ExpiresAt) {
+			return ResolvedSession{}, fmt.Errorf("live session has expired")
+		}
+		return ResolvedSession{
+			Code:      response.Code,
+			URL:       response.URL,
+			Project:   response.Project,
+			Device:    response.Device,
+			ExpiresAt: response.ExpiresAt,
+		}, nil
+	}
+}
+
+func validCode(code string) bool {
+	if len(code) < 4 || len(code) > 8 {
+		return false
+	}
+	for _, character := range code {
+		if !strings.ContainsRune(string(codeAlphabet), character) {
+			return false
+		}
+	}
+	return true
+}
+
+func deviceName() string {
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return "Local Device"
 }
