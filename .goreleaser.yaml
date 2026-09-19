@@ -44,3 +44,19 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
+
+brews:
+  - name: cast
+    repository:
+      owner: Ario2006
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/Ario2006/cast"
+    description: "Fast, local-first developer CLI for file sharing, live sessions, clipboard, and calculations"
+    license: "MIT"
+    folder: Formula
+    install: |
+      bin.install "cast"
+    test: |
+      system "#{bin}/cast", "--version"
+      assert_equal "480\n", shell_output("#{bin}/cast calc 15 * 32")

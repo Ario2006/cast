@@ -4,6 +4,22 @@
 
 ---
 
+## Installation
+
+### Homebrew (macOS & Linux)
+
+```bash
+brew install Ario2006/tap/cast
+```
+
+### Go Install
+
+```bash
+go install github.com/aryankumar/cast/cmd/cast@latest
+```
+
+---
+
 ## Capabilities & Commands
 
 ### 1. Live Projects & Services
