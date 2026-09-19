@@ -3,9 +3,7 @@ package share
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,11 +16,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	netplatform "github.com/aryankumar/cast/internal/platform/net"
+	"github.com/aryankumar/cast/internal/transport/discovery"
 )
 
-const discoveryPort = 39421
-
-var codeAlphabet = []byte("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+const discoveryPort = discovery.SharePort
 
 // Session describes an active, read-only file share. URL contains a
 // high-entropy authorization token; Code is a human-friendly discovery key.
@@ -204,7 +203,7 @@ func Resolve(ctx context.Context, code string) (ResolvedShare, error) {
 		return ResolvedShare{}, fmt.Errorf("start local share discovery: %w", err)
 	}
 	defer connection.Close()
-	if err := enableBroadcast(connection); err != nil {
+	if err := netplatform.EnableBroadcast(connection); err != nil {
 		return ResolvedShare{}, fmt.Errorf("enable local share discovery: %w", err)
 	}
 	payload, _ := json.Marshal(discoveryRequest{Type: "cast-share-discover", Code: code})
@@ -316,41 +315,15 @@ func downloadedName(response *http.Response, fallback string) string {
 }
 
 func randomCode(length int) (string, error) {
-	bytes := make([]byte, length)
-	for index := range bytes {
-		for {
-			var randomByte [1]byte
-			if _, err := rand.Read(randomByte[:]); err != nil {
-				return "", fmt.Errorf("generate share code: %w", err)
-			}
-			limit := 256 - (256 % len(codeAlphabet))
-			if int(randomByte[0]) < limit {
-				bytes[index] = codeAlphabet[int(randomByte[0])%len(codeAlphabet)]
-				break
-			}
-		}
-	}
-	return string(bytes), nil
+	return discovery.RandomCode(length)
 }
 
 func randomToken() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("generate share token: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
+	return discovery.RandomToken()
 }
 
 func validCode(code string) bool {
-	if len(code) < 4 || len(code) > 8 {
-		return false
-	}
-	for _, character := range code {
-		if !strings.ContainsRune(string(codeAlphabet), character) {
-			return false
-		}
-	}
-	return true
+	return discovery.ValidCode(code)
 }
 
 func sessionURL(address net.IP, port int, code, token string) string {
@@ -362,22 +335,5 @@ func sessionURL(address net.IP, port int, code, token string) string {
 }
 
 func localIPv4() net.IP {
-	interfaces, err := net.Interfaces()
-	if err == nil {
-		for _, networkInterface := range interfaces {
-			if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			addresses, err := networkInterface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, address := range addresses {
-				if ip, ok := address.(*net.IPNet); ok && ip.IP.To4() != nil && !ip.IP.IsLoopback() {
-					return ip.IP.To4()
-				}
-			}
-		}
-	}
-	return net.IPv4(127, 0, 0, 1)
+	return discovery.LocalIPv4()
 }

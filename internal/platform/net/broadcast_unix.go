@@ -1,13 +1,14 @@
 //go:build darwin || linux
 
-package share
+package net
 
 import (
 	"net"
 	"syscall"
 )
 
-func enableBroadcast(connection *net.UDPConn) error {
+// EnableBroadcast configures a UDP socket to permit broadcasting.
+func EnableBroadcast(connection *net.UDPConn) error {
 	raw, err := connection.SyscallConn()
 	if err != nil {
 		return err

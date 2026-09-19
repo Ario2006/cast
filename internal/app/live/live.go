@@ -4,9 +4,7 @@ package live
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -23,11 +21,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aryankumar/cast/internal/config"
+	"github.com/aryankumar/cast/internal/identity"
+	netplatform "github.com/aryankumar/cast/internal/platform/net"
+	"github.com/aryankumar/cast/internal/transport/discovery"
 )
 
-const discoveryPort = 39422
-
-var codeAlphabet = []byte("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+const discoveryPort = discovery.LivePort
 
 // Session contains the user-facing details of an active live directory.
 type Session struct {
@@ -332,29 +333,11 @@ func (s *Server) serveDirectory(writer http.ResponseWriter, request *http.Reques
 }
 
 func randomCode(length int) (string, error) {
-	bytes := make([]byte, length)
-	for index := range bytes {
-		for {
-			var byteValue [1]byte
-			if _, err := rand.Read(byteValue[:]); err != nil {
-				return "", fmt.Errorf("generate live code: %w", err)
-			}
-			limit := 256 - (256 % len(codeAlphabet))
-			if int(byteValue[0]) < limit {
-				bytes[index] = codeAlphabet[int(byteValue[0])%len(codeAlphabet)]
-				break
-			}
-		}
-	}
-	return string(bytes), nil
+	return discovery.RandomCode(length)
 }
 
 func randomToken() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("generate live token: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
+	return discovery.RandomToken()
 }
 
 func sessionURL(address net.IP, port int, code, token string) string {
@@ -366,24 +349,7 @@ func sessionURL(address net.IP, port int, code, token string) string {
 }
 
 func localIPv4() net.IP {
-	interfaces, err := net.Interfaces()
-	if err == nil {
-		for _, networkInterface := range interfaces {
-			if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			addresses, err := networkInterface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, address := range addresses {
-				if ip, ok := address.(*net.IPNet); ok && ip.IP.To4() != nil && !ip.IP.IsLoopback() {
-					return ip.IP.To4()
-				}
-			}
-		}
-	}
-	return net.IPv4(127, 0, 0, 1)
+	return discovery.LocalIPv4()
 }
 
 func (s *Server) startDiscovery() error {
@@ -456,7 +422,7 @@ func Resolve(ctx context.Context, code string) (ResolvedSession, error) {
 		return ResolvedSession{}, fmt.Errorf("start local live discovery: %w", err)
 	}
 	defer connection.Close()
-	if err := enableBroadcast(connection); err != nil {
+	if err := netplatform.EnableBroadcast(connection); err != nil {
 		return ResolvedSession{}, fmt.Errorf("enable local live discovery: %w", err)
 	}
 	payload, _ := json.Marshal(discoveryRequest{Type: "cast-live-discover", Code: code})
@@ -501,18 +467,15 @@ func Resolve(ctx context.Context, code string) (ResolvedSession, error) {
 }
 
 func validCode(code string) bool {
-	if len(code) < 4 || len(code) > 8 {
-		return false
-	}
-	for _, character := range code {
-		if !strings.ContainsRune(string(codeAlphabet), character) {
-			return false
-		}
-	}
-	return true
+	return discovery.ValidCode(code)
 }
 
 func deviceName() string {
+	if configDir, err := config.Dir(); err == nil {
+		if dev, err := identity.LoadOrCreate(configDir); err == nil && dev.Name != "" {
+			return dev.Name
+		}
+	}
 	if host, err := os.Hostname(); err == nil && host != "" {
 		return host
 	}
