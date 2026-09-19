@@ -55,3 +55,16 @@ func TestCalcCommand(t *testing.T) {
 		t.Fatalf("calc output = %q", got)
 	}
 }
+
+func TestConvCommandWithDirectTarget(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRootCommand(Options{Out: &out})
+	cmd.SetArgs([]string{"conv", "10", "km", "mi"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); got != "10 km = 6.2137119223733395 mi\n" {
+		t.Fatalf("conv output = %q", got)
+	}
+}

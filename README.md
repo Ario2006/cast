@@ -9,6 +9,7 @@ cast --help
 cast --version
 cast version
 cast calc '(12 + 8) * 3'
+cast conv 10 km mi
 ```
 
 ## Development
