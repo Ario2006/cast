@@ -8,6 +8,7 @@ The prototype is under active development. The first available commands are:
 cast --help
 cast --version
 cast version
+cast calc '(12 + 8) * 3'
 ```
 
 ## Development

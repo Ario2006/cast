@@ -42,3 +42,16 @@ func TestPrintErrorIncludesHint(t *testing.T) {
 		t.Fatalf("PrintError() = %q", output.String())
 	}
 }
+
+func TestCalcCommand(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRootCommand(Options{Out: &out})
+	cmd.SetArgs([]string{"calc", "(12 + 8) * 3"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); got != "60\n" {
+		t.Fatalf("calc output = %q", got)
+	}
+}
