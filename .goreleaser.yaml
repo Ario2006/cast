@@ -27,7 +27,7 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - README.md
       - LICENSE*
@@ -45,7 +45,7 @@ changelog:
       - "^docs:"
       - "^test:"
 
-brews:
+homebrew_casks:
   - name: cast
     repository:
       owner: Ario2006
@@ -54,9 +54,6 @@ brews:
     homepage: "https://github.com/Ario2006/cast"
     description: "Fast, local-first developer CLI for file sharing, live sessions, clipboard, and calculations"
     license: "MIT"
-    folder: Formula
-    install: |
-      bin.install "cast"
-    test: |
-      system "#{bin}/cast", "--version"
-      assert_equal "480\n", shell_output("#{bin}/cast calc 15 * 32")
+    directory: Casks
+    binaries:
+      - cast
