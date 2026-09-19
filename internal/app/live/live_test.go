@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -95,6 +96,48 @@ func TestLiveDirectoryExpires(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusGone {
 		t.Fatalf("expired status = %d", response.StatusCode)
+	}
+}
+
+func TestLiveProxyForwardsRequestsWithoutToken(t *testing.T) {
+	backend := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api" || request.URL.Query().Get("q") != "cast" || request.URL.Query().Get("token") != "" {
+			http.Error(writer, "unexpected forwarded request", http.StatusBadRequest)
+			return
+		}
+		_, _ = writer.Write([]byte("proxied response"))
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go backend.Serve(listener)
+	defer backend.Close()
+
+	server, err := StartProxy(listener.Addr().(*net.TCPAddr).Port, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+	proxyURL := addPath(server.Session().LocalURL, "api") + "&q=cast"
+	response, err := http.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "proxied response" {
+		t.Fatalf("proxy response = %d, %q", response.StatusCode, body)
+	}
+
+	withoutToken := strings.Split(server.Session().LocalURL, "?")[0]
+	response, err = http.Get(withoutToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing token status = %d", response.StatusCode)
 	}
 }
 

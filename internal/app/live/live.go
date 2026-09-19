@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	pathpkg "path"
@@ -45,6 +46,7 @@ type Server struct {
 	realRoot string
 	http     *http.Server
 	listener net.Listener
+	proxy    *httputil.ReverseProxy
 	stopOnce sync.Once
 }
 
@@ -111,6 +113,92 @@ func (s *Server) Stop(ctx context.Context) error {
 	var stopErr error
 	s.stopOnce.Do(func() { stopErr = s.http.Shutdown(ctx) })
 	return stopErr
+}
+
+// StartProxy exposes an already-running HTTP service on localPort through a
+// token-protected, expiring live session.
+func StartProxy(localPort int, lifetime time.Duration) (*Server, error) {
+	if localPort < 1 || localPort > 65535 {
+		return nil, fmt.Errorf("local service port must be between 1 and 65535")
+	}
+	if lifetime <= 0 {
+		return nil, fmt.Errorf("live session lifetime must be positive")
+	}
+	targetAddress := net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", localPort))
+	connection, err := net.DialTimeout("tcp", targetAddress, time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connect to local service on port %d: %w", localPort, err)
+	}
+	_ = connection.Close()
+
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		return nil, fmt.Errorf("listen for live session: %w", err)
+	}
+	code, err := randomCode(6)
+	if err != nil {
+		listener.Close()
+		return nil, err
+	}
+	token, err := randomToken()
+	if err != nil {
+		listener.Close()
+		return nil, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	createdAt := time.Now()
+	server := &Server{
+		token:    token,
+		listener: listener,
+		session: Session{
+			Code:      code,
+			Root:      "http://localhost:" + fmt.Sprintf("%d", localPort),
+			CreatedAt: createdAt,
+			ExpiresAt: createdAt.Add(lifetime),
+			URL:       sessionURL(localIPv4(), port, code, token),
+			LocalURL:  sessionURL(net.IPv4(127, 0, 0, 1), port, code, token),
+		},
+	}
+	target := &url.URL{Scheme: "http", Host: targetAddress}
+	server.proxy = httputil.NewSingleHostReverseProxy(target)
+	server.proxy.Director = func(request *http.Request) {
+		prefix := "/c/" + server.session.Code
+		proxiedPath := strings.TrimPrefix(request.URL.Path, prefix)
+		if proxiedPath == "" {
+			proxiedPath = "/"
+		}
+		query := request.URL.Query()
+		query.Del("token")
+		request.URL.Scheme = target.Scheme
+		request.URL.Host = target.Host
+		request.URL.Path = proxiedPath
+		request.URL.RawPath = ""
+		request.URL.RawQuery = query.Encode()
+		request.Host = target.Host
+	}
+	server.proxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, _ error) {
+		http.Error(writer, "Could not reach the local service behind this live session.", http.StatusBadGateway)
+	}
+	server.http = &http.Server{Handler: http.HandlerFunc(server.serveProxy)}
+	go func() { _ = server.http.Serve(listener) }()
+	return server, nil
+}
+
+func (s *Server) serveProxy(writer http.ResponseWriter, request *http.Request) {
+	prefix := "/c/" + s.session.Code
+	if request.URL.Path != prefix && !strings.HasPrefix(request.URL.Path, prefix+"/") {
+		http.NotFound(writer, request)
+		return
+	}
+	if time.Now().After(s.session.ExpiresAt) {
+		http.Error(writer, "This live session has expired.", http.StatusGone)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(request.URL.Query().Get("token")), []byte(s.token)) != 1 {
+		http.Error(writer, "A valid live-session token is required.", http.StatusForbidden)
+		return
+	}
+	s.proxy.ServeHTTP(writer, request)
 }
 
 func (s *Server) serve(writer http.ResponseWriter, request *http.Request) {
