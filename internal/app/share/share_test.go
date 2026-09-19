@@ -1,6 +1,7 @@
 package share
 
 import (
+	"archive/zip"
 	"context"
 	"io"
 	"net/http"
@@ -108,5 +109,68 @@ func TestResolveFindsActiveLocalShare(t *testing.T) {
 	}
 	if resolved.URL != server.Session().URL || resolved.Name != "report.txt" {
 		t.Fatalf("Resolve() = %#v", resolved)
+	}
+}
+
+func TestFolderShareCreatesTemporaryZipAndCleansUp(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file1.txt"), []byte("data1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "file2.txt"), []byte("data2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := Start(dir, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempZipPath := server.tempPath
+	if tempZipPath == "" {
+		t.Fatal("server.tempPath is empty for directory share")
+	}
+	if _, err := os.Stat(tempZipPath); err != nil {
+		t.Fatalf("temp zip file does not exist: %v", err)
+	}
+
+	destination := t.TempDir()
+	receivedPath, err := Receive(context.Background(), ResolvedShare{
+		URL:  server.Session().LocalURL,
+		Name: server.Session().Name,
+	}, destination, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(receivedPath, ".zip") {
+		t.Fatalf("receivedPath = %q, want .zip extension", receivedPath)
+	}
+
+	zipReader, err := zip.OpenReader(receivedPath)
+	if err != nil {
+		t.Fatalf("open received zip: %v", err)
+	}
+	foundFile1, foundFile2 := false, false
+	for _, f := range zipReader.File {
+		if f.Name == "file1.txt" {
+			foundFile1 = true
+		}
+		if f.Name == "sub/file2.txt" {
+			foundFile2 = true
+		}
+	}
+	_ = zipReader.Close()
+	if !foundFile1 || !foundFile2 {
+		t.Fatalf("zip contents missing files: file1=%v, file2=%v", foundFile1, foundFile2)
+	}
+
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tempZipPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary zip %q was not removed after Stop()", tempZipPath)
 	}
 }

@@ -19,9 +19,9 @@ const shareLifetime = 10 * time.Minute
 
 func newShareCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "share FILE",
-		Short: "Share a file on the local network",
-		Long:  "Share a regular file by QR code or short code for ten minutes. The file stays on this device.",
+		Use:   "share FILE|DIRECTORY",
+		Short: "Share a file or folder on the local network",
+		Long:  "Share a regular file or directory by QR code or short code for ten minutes. Folders are shared as temporary ZIP archives.",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runShare,
 	}
@@ -37,9 +37,9 @@ func newReceiveCommand() *cobra.Command {
 }
 
 func runShare(cmd *cobra.Command, args []string) error {
-	server, err := shareapp.StartFile(args[0], shareLifetime)
+	server, err := shareapp.Start(args[0], shareLifetime)
 	if err != nil {
-		return apperror.Wrap("Could not start this file share.", "Choose an existing regular file and ensure another cast share is not already running.", err)
+		return apperror.Wrap("Could not start this file share.", "Choose an existing regular file or directory and ensure another cast share is not already running.", err)
 	}
 	defer server.Stop(context.Background())
 	session := server.Session()

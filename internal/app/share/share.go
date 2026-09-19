@@ -2,6 +2,7 @@
 package share
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -40,6 +41,7 @@ type Server struct {
 	session  Session
 	token    string
 	path     string
+	tempPath string
 	http     *http.Server
 	listener net.Listener
 	udp      *net.UDPConn
@@ -48,42 +50,81 @@ type Server struct {
 
 // StartFile starts an expiring read-only HTTP share for a regular file.
 func StartFile(path string, lifetime time.Duration) (*Server, error) {
+	return Start(path, lifetime)
+}
+
+// Start starts an expiring read-only HTTP share for a regular file or directory.
+// When sharing a directory, a temporary ZIP archive is created and automatically
+// removed when the server stops or expires.
+func Start(path string, lifetime time.Duration) (*Server, error) {
 	if lifetime <= 0 {
 		return nil, fmt.Errorf("share lifetime must be positive")
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect shared file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("only regular files can be shared")
+		return nil, fmt.Errorf("inspect shared target: %w", err)
 	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve shared file path: %w", err)
+		return nil, fmt.Errorf("resolve shared target path: %w", err)
 	}
+
+	var (
+		sharePath string
+		tempPath  string
+		name      string
+		size      int64
+	)
+
+	if info.IsDir() {
+		tempZip, zipSize, err := createTempZip(absolutePath)
+		if err != nil {
+			return nil, err
+		}
+		sharePath = tempZip
+		tempPath = tempZip
+		name = filepath.Base(absolutePath) + ".zip"
+		size = zipSize
+	} else if info.Mode().IsRegular() {
+		sharePath = absolutePath
+		name = info.Name()
+		size = info.Size()
+	} else {
+		return nil, fmt.Errorf("only regular files and directories can be shared")
+	}
+
 	code, err := randomCode(6)
 	if err != nil {
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
 		return nil, err
 	}
 	token, err := randomToken()
 	if err != nil {
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
 		return nil, err
 	}
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
 		return nil, fmt.Errorf("listen for file share: %w", err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	createdAt := time.Now()
 	server := &Server{
-		path:     absolutePath,
+		path:     sharePath,
+		tempPath: tempPath,
 		token:    token,
 		listener: listener,
 		session: Session{
 			Code:      code,
-			Name:      info.Name(),
-			Size:      info.Size(),
+			Name:      name,
+			Size:      size,
 			CreatedAt: createdAt,
 			ExpiresAt: createdAt.Add(lifetime),
 			URL:       sessionURL(localIPv4(), port, code, token),
@@ -106,6 +147,9 @@ func (s *Server) Session() Session { return s.session }
 func (s *Server) Stop(ctx context.Context) error {
 	var stopErr error
 	s.stopOnce.Do(func() {
+		if s.tempPath != "" {
+			_ = os.Remove(s.tempPath)
+		}
 		if s.udp != nil {
 			_ = s.udp.Close()
 		}
@@ -120,6 +164,9 @@ func (s *Server) serveDownload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	if time.Now().After(s.session.ExpiresAt) {
+		if s.tempPath != "" {
+			_ = os.Remove(s.tempPath)
+		}
 		http.Error(writer, "This share has expired.", http.StatusGone)
 		return
 	}
@@ -139,7 +186,11 @@ func (s *Server) serveDownload(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, "The shared file is no longer available.", http.StatusNotFound)
 		return
 	}
-	if contentType := mime.TypeByExtension(filepath.Ext(s.session.Name)); contentType != "" {
+	contentType := mime.TypeByExtension(filepath.Ext(s.session.Name))
+	if contentType == "" && strings.HasSuffix(s.session.Name, ".zip") {
+		contentType = "application/zip"
+	}
+	if contentType != "" {
 		writer.Header().Set("Content-Type", contentType)
 	}
 	writer.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
@@ -336,4 +387,87 @@ func sessionURL(address net.IP, port int, code, token string) string {
 
 func localIPv4() net.IP {
 	return discovery.LocalIPv4()
+}
+
+func createTempZip(sourceDir string) (string, int64, error) {
+	tempFile, err := os.CreateTemp("", "cast-share-*.zip")
+	if err != nil {
+		return "", 0, fmt.Errorf("create temporary zip file: %w", err)
+	}
+
+	zipWriter := zip.NewWriter(tempFile)
+	realRoot, err := filepath.EvalSymlinks(sourceDir)
+	if err != nil {
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+		return "", 0, fmt.Errorf("resolve directory symlinks: %w", err)
+	}
+
+	walkErr := filepath.Walk(sourceDir, func(filePath string, fileInfo os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		realPath, err := filepath.EvalSymlinks(filePath)
+		if err != nil {
+			return nil
+		}
+		relToReal, err := filepath.Rel(realRoot, realPath)
+		if err != nil || relToReal == ".." || strings.HasPrefix(relToReal, ".."+string(filepath.Separator)) {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(sourceDir, filePath)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		header, err := zip.FileInfoHeader(fileInfo)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(relPath)
+		if fileInfo.IsDir() {
+			header.Name += "/"
+		} else {
+			header.Method = zip.Deflate
+		}
+
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		if fileInfo.IsDir() {
+			return nil
+		}
+		file, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.Copy(writer, file)
+		return err
+	})
+
+	if walkErr != nil {
+		_ = zipWriter.Close()
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+		return "", 0, fmt.Errorf("compress directory: %w", walkErr)
+	}
+	if err := zipWriter.Close(); err != nil {
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+		return "", 0, fmt.Errorf("close zip writer: %w", err)
+	}
+	_ = tempFile.Close()
+
+	stat, err := os.Stat(tempFile.Name())
+	if err != nil {
+		_ = os.Remove(tempFile.Name())
+		return "", 0, err
+	}
+	return tempFile.Name(), stat.Size(), nil
 }

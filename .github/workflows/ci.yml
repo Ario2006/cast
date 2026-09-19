@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Verify Formatting
+        run: |
+          UNFORMATTED=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Unformatted files found:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run Vet
+        run: go vet ./...
+
+      - name: Run Tests
+        run: go test -v -race ./...
+
+  cross-compile:
+    name: Cross-Compile Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: windows
+            arch: amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build binary for ${{ matrix.os }}/${{ matrix.arch }}
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: go build -v -o /dev/null ./cmd/cast
