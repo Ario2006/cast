@@ -14,22 +14,31 @@ import (
 // Select presents choices in a keyboard-driven Bubble Tea menu. It returns
 // selected=false when the user cancels with q, Escape, or Ctrl+C.
 func Select(input io.Reader, output io.Writer, title string, choices []string) (choice string, selected bool, err error) {
+	index, selected, err := SelectIndex(input, output, title, choices)
+	if err != nil || !selected {
+		return "", selected, err
+	}
+	return choices[index], true, nil
+}
+
+// SelectIndex presents choices and returns the selected zero-based index.
+func SelectIndex(input io.Reader, output io.Writer, title string, choices []string) (index int, selected bool, err error) {
 	if len(choices) == 0 {
-		return "", false, fmt.Errorf("cannot select from an empty list")
+		return 0, false, fmt.Errorf("cannot select from an empty list")
 	}
 	program := tea.NewProgram(selector{title: title, choices: choices}, tea.WithInput(input), tea.WithOutput(output))
 	final, err := program.Run()
 	if err != nil {
-		return "", false, err
+		return 0, false, err
 	}
 	model, ok := final.(selector)
 	if !ok {
-		return "", false, fmt.Errorf("unexpected selector model")
+		return 0, false, fmt.Errorf("unexpected selector model")
 	}
 	if model.cancelled || !model.selected {
-		return "", false, nil
+		return 0, false, nil
 	}
-	return model.choices[model.cursor], true, nil
+	return model.cursor, true, nil
 }
 
 type selector struct {

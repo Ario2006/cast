@@ -68,3 +68,17 @@ func TestConvCommandWithDirectTarget(t *testing.T) {
 		t.Fatalf("conv output = %q", got)
 	}
 }
+
+func TestClipClearCommand(t *testing.T) {
+	t.Setenv("CAST_CONFIG_DIR", t.TempDir())
+	var out bytes.Buffer
+	cmd := NewRootCommand(Options{Out: &out})
+	cmd.SetArgs([]string{"clip", "clear"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); got != "Clipboard history cleared.\n" {
+		t.Fatalf("clip clear output = %q", got)
+	}
+}

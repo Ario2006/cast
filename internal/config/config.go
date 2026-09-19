@@ -44,3 +44,12 @@ func FilePath() (string, error) {
 	}
 	return filepath.Join(dir, "config.toml"), nil
 }
+
+// DataPath returns the location for a small piece of cast-owned local data.
+func DataPath(name string) (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
+}
