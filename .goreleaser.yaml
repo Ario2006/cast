@@ -50,6 +50,7 @@ homebrew_casks:
     repository:
       owner: Ario2006
       name: homebrew-tap
+      branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/Ario2006/cast"
     description: "Fast, local-first developer CLI for file sharing, live sessions, clipboard, and calculations"
