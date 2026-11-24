@@ -15,7 +15,6 @@
   - [Homebrew (macOS & Linux)](#homebrew-macos--linux)
   - [Go Install](#go-install)
   - [Building from Source](#building-from-source)
-  - [Shell Completion](#shell-completion)
 - [Quick Reference](#quick-reference)
 - [Use Cases & Features by Category](#use-cases--features-by-category)
   - [1. Local Network Sharing & Collaboration](#1-local-network-sharing--collaboration)
@@ -75,24 +74,6 @@ make build
 # Binary is generated at ./cast
 ```
 
-### Shell Completion
-
-Generate command autocompletion scripts:
-
-```bash
-# Bash
-cast completion bash > /etc/bash_completion.d/cast
-
-# Zsh
-cast completion zsh > "${fpath[1]}/_cast"
-
-# Fish
-cast completion fish > ~/.config/fish/completions/cast.fish
-
-# PowerShell
-cast completion powershell | Out-String | Invoke-Expression
-```
-
 ---
 
 ## Quick Reference
@@ -107,7 +88,6 @@ cast completion powershell | Out-String | Invoke-Expression
 | `cast clip clear` | _none_ | Delete all stored local clipboard history |
 | `cast calc` | `<expression>` | Evaluate arithmetic expressions without shell execution |
 | `cast conv` | `<val> <unit> [target]`| Convert between units (interactive picker if target omitted) |
-| `cast completion` | `<shell>` | Generate autocompletion script (`bash`, `zsh`, `fish`, `powershell`) |
 | `cast version` | _none_ | Print current `cast` version |
 
 **Global Flags:**
@@ -236,26 +216,29 @@ cast clip clear
 
 Perform decimal calculations directly in your terminal without invoking external scripting engines or risking shell injection.
 
+> [!TIP]
+> Enclose expressions in single quotes (e.g. `'15 + 4 * 3'`) so that your shell does not interpret `*` as a file glob, or `(` and `)` as subshells.
+
 ```bash
-# Basic arithmetic
-cast calc 15 * 32
-cast calc 100 / 4 + 2.5
+# Basic arithmetic (recommended in quotes)
+cast calc '15 + 4 * 3'
+cast calc '100 / 4 + 2.5'
 
 # Parentheses and order of operations
 cast calc '(12 + 8) * 3'
 
 # Exponentiation and modulo
-cast calc 2 ^ 10
-cast calc 27 % 4
+cast calc '2 ^ 10'
+cast calc '27 % 4'
 
-# Unary operators
-cast calc -5 * (10 + -2)
+# Unary operators and negative numbers
+cast calc '-5 * (10 + -2)'
 ```
 
 **Features:**
 - **Operators Supported**: Addition (`+`), subtraction (`-`), multiplication (`*`), division (`/`), modulo (`%`), power (`^`), unary minus/plus (`-`/`+`), parentheses (`(...)`).
 - **Safety**: Evaluated using a custom recursive-descent parser. No shell `eval`, no Python/Node subprocesses, zero code injection vulnerabilities.
-- **Shell Friendly**: Pass expressions as separate arguments or as a quoted string.
+- **Shell Glob Recovery**: `cast` intelligently detects and recovers if an unquoted `*` operator was expanded into directory files by your shell.
 
 ---
 

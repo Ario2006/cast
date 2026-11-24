@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,34 @@ func TestCalcCommand(t *testing.T) {
 	}
 	if got := out.String(); got != "60\n" {
 		t.Fatalf("calc output = %q", got)
+	}
+}
+
+func TestCalcCommand_UnquotedGlob(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRootCommand(Options{Out: &out})
+	matches, _ := filepath.Glob("*")
+	args := []string{"calc", "15", "+", "4"}
+	args = append(args, matches...)
+	args = append(args, "3")
+	cmd.SetArgs(args)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); got != "27\n" {
+		t.Fatalf("calc output = %q, want 27\n", got)
+	}
+}
+
+func TestCompletionCommandDisabled(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cmd := NewRootCommand(Options{Out: &out, ErrOut: &errOut})
+	cmd.SetArgs([]string{"completion"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error for disabled completion command, got nil")
 	}
 }
 
